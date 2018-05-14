@@ -385,7 +385,7 @@ class IntegrationSpec extends TestKit(ActorSystem("IntegrationSpec"))
       }
     }
 
-    "call the onRevoked hook" in {
+    "call the onRevoked hook" ignore {
       assertAllStagesStopped {
         val topic = createTopic(1)
         val group = createGroup(1)

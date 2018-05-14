@@ -1,5 +1,7 @@
 import scalariform.formatter.preferences._
+
 import de.heikoseeberger.sbtheader.HeaderPattern
+import sbt.Keys.organization
 
 name := "akka-stream-kafka"
 
@@ -29,7 +31,7 @@ val coreDependencies = Seq(
 )
 
 val commonSettings = Seq(
-  organization := "com.typesafe.akka",
+  organization := "com.telefonica",
   organizationName := "Lightbend",
   startYear := Some(2014),
   test in assembly := {},
@@ -83,6 +85,10 @@ lazy val core = project
   .settings(commonSettings)
   .settings(Seq(
     name := "akka-stream-kafka",
+    publishMavenStyle := true,
+    organization := "com.telefonica",
+    version := "0.18-secure-rebalance",
+    publishTo := Some("Baikal Internal Dependencies Snapshots" at "s3://s3-us-east-1.amazonaws.com/4pf-internal-dependencies/snapshots"),
     libraryDependencies ++= commonDependencies ++ coreDependencies
 ))
 

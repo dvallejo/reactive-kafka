@@ -17,3 +17,5 @@ addSbtPlugin("com.lightbend.paradox" % "sbt-paradox" % "0.2.9")
 addSbtPlugin("com.lightbend" % "sbt-whitesource"  % "0.1.2")
 
 addSbtPlugin("com.typesafe.sbt" % "sbt-git" % "0.9.3")
+
+addSbtPlugin("com.frugalmechanic" % "fm-sbt-s3-resolver" % "0.13.0")

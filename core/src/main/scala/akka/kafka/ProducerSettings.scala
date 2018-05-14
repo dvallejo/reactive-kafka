@@ -2,6 +2,7 @@
  * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
+
 package akka.kafka
 
 import java.util.Optional
@@ -139,7 +140,7 @@ object ProducerSettings {
  * `apply` and `create` functions for convenient construction of the settings, together with
  * the `with` methods.
  */
-final class ProducerSettings[K, V](
+class ProducerSettings[K, V](
     val properties: Map[String, String],
     val keySerializerOpt: Option[Serializer[K]],
     val valueSerializerOpt: Option[Serializer[V]],

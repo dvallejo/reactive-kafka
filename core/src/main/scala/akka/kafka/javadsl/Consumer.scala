@@ -2,6 +2,7 @@
  * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
+
 package akka.kafka.javadsl
 
 import java.util.concurrent.CompletionStage
@@ -15,11 +16,12 @@ import akka.kafka.{AutoSubscription, ConsumerSettings, ManualSubscription, Subsc
 import akka.stream.javadsl.Source
 import akka.{Done, NotUsed}
 import org.apache.kafka.clients.consumer.ConsumerRecord
-import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration.FiniteDuration
 import scala.compat.java8.FutureConverters
+import scala.concurrent.Future
 
 /**
  * Akka Stream connector for subscribing to Kafka topics.
@@ -51,6 +53,12 @@ object Consumer {
      * from downstream cancellation, errors, or [[#shutdown]].
      */
     def isShutdown: CompletionStage[Done]
+
+    /**
+     * Exposes underlying consumer or producer metrics (as reported by underlying Kafka client library)
+     */
+    def getMetrics: CompletionStage[java.util.Map[MetricName, Metric]]
+
   }
 
   /**

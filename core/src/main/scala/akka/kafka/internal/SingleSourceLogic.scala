@@ -2,24 +2,34 @@
  * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
+
 package akka.kafka.internal
 
 import akka.actor.{ActorRef, ExtendedActorSystem, Terminated}
+import akka.dispatch.ExecutionContexts
+import akka.event.Logging
+import akka.kafka.KafkaConsumerActor.Internal.{ConsumerMetrics, RequestMetrics}
 import akka.kafka.Subscriptions._
-import akka.kafka.{ConsumerFailed, ConsumerSettings, KafkaConsumerActor, Subscription}
+import akka.kafka._
 import akka.stream.stage.GraphStageLogic.StageActor
-import akka.stream.stage.{GraphStageLogic, OutHandler}
+import akka.stream.stage.{GraphStageLogic, OutHandler, StageLogging}
 import akka.stream.{ActorMaterializerHelper, SourceShape}
-import org.apache.kafka.clients.consumer.ConsumerRecord
-import org.apache.kafka.common.TopicPartition
+import akka.util.Timeout
+import org.apache.kafka.clients.consumer.{Consumer, ConsumerRecord}
+import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
 
+import scala.collection.JavaConverters._
 import scala.annotation.tailrec
+import scala.concurrent.Future
 
 private[kafka] abstract class SingleSourceLogic[K, V, Msg](
     val shape: SourceShape[Msg],
     settings: ConsumerSettings[K, V],
     subscription: Subscription
-) extends GraphStageLogic(shape) with PromiseControl with MessageBuilder[K, V, Msg] {
+) extends GraphStageLogic(shape) with PromiseControl with MessageBuilder[K, V, Msg] with StageLogging {
+
+  override protected def logSource: Class[_] = classOf[SingleSourceLogic[K, V, Msg]]
+
   var consumer: ActorRef = _
   var self: StageActor = _
   var tps = Set.empty[TopicPartition]
@@ -27,6 +37,7 @@ private[kafka] abstract class SingleSourceLogic[K, V, Msg](
   var requested = false
   var requestId = 0
   var shutdownStarted = false
+  val partitionLogLevel = if (settings.wakeupDebug) Logging.InfoLevel else Logging.DebugLevel
 
   override def preStart(): Unit = {
     super.preStart()
@@ -56,35 +67,47 @@ private[kafka] abstract class SingleSourceLogic[K, V, Msg](
     self.watch(consumer)
 
     val partitionAssignedCB = getAsyncCallback[Set[TopicPartition]] { newTps =>
+      // Is info too much here? Will be logged at startup / rebalance
       tps ++= newTps
+      log.log(partitionLogLevel, "Assigned partitions: {}. All partitions: {}", newTps, tps)
+      notifyUserOnAssign(newTps)
       requestMessages()
     }
 
     val partitionRevokedCB = getAsyncCallback[Set[TopicPartition]] { newTps =>
       tps --= newTps
-      requestMessages()
+      log.log(partitionLogLevel, "Revoked partitions: {}. All partitions: {}", newTps, tps)
+      notifyUserOnRevoke(newTps)
     }
 
-    def rebalanceListener =
-      KafkaConsumerActor.rebalanceListener(tps => partitionAssignedCB.invoke(tps), partitionRevokedCB.invoke)
+    def rebalanceListener: KafkaConsumerActor.ListenerCallbacks = {
+      val onAssign: Set[TopicPartition] ⇒ Unit = tps ⇒ partitionAssignedCB.invoke(tps)
+      val onRevoke: Set[TopicPartition] ⇒ Unit = set ⇒ partitionRevokedCB.invoke(set)
+      KafkaConsumerActor.rebalanceListener(onAssign, onRevoke)
+    }
 
     subscription match {
-      case TopicSubscription(topics) =>
+      case TopicSubscription(topics, _) =>
         consumer.tell(KafkaConsumerActor.Internal.Subscribe(topics, rebalanceListener), self.ref)
-      case TopicSubscriptionPattern(topics) =>
+      case TopicSubscriptionPattern(topics, _) =>
         consumer.tell(KafkaConsumerActor.Internal.SubscribePattern(topics, rebalanceListener), self.ref)
-      case Assignment(topics) =>
+      case Assignment(topics, _) =>
         consumer.tell(KafkaConsumerActor.Internal.Assign(topics), self.ref)
         tps ++= topics
-      case AssignmentWithOffset(topics) =>
+      case AssignmentWithOffset(topics, _) =>
         consumer.tell(KafkaConsumerActor.Internal.AssignWithOffset(topics), self.ref)
         tps ++= topics.keySet
-      case AssignmentOffsetsForTimes(topics) =>
+      case AssignmentOffsetsForTimes(topics, _) =>
         consumer.tell(KafkaConsumerActor.Internal.AssignOffsetsForTimes(topics), self.ref)
         tps ++= topics.keySet
     }
 
   }
+
+  private def notifyUserOnAssign(set: Set[TopicPartition]): Unit =
+    subscription.rebalanceListener.foreach(ref ⇒ ref ! TopicPartitionsAssigned(subscription, set))
+  private def notifyUserOnRevoke(set: Set[TopicPartition]): Unit =
+    subscription.rebalanceListener.foreach(ref ⇒ ref ! TopicPartitionsRevoked(subscription, set))
 
   @tailrec
   private def pump(): Unit = {
@@ -103,6 +126,7 @@ private[kafka] abstract class SingleSourceLogic[K, V, Msg](
   private def requestMessages(): Unit = {
     requested = true
     requestId += 1
+    log.debug("Requesting messages, requestId: {}, partitions: {}", requestId, tps)
     consumer.tell(KafkaConsumerActor.Internal.RequestMessages(requestId, tps), self.ref)
   }
 
@@ -122,7 +146,7 @@ private[kafka] abstract class SingleSourceLogic[K, V, Msg](
     super.postStop()
   }
 
-  override def performShutdown() = {
+  override def performShutdown(): Unit = {
     setKeepGoing(true)
     if (!isClosed(shape.out)) {
       complete(shape.out)
@@ -134,4 +158,11 @@ private[kafka] abstract class SingleSourceLogic[K, V, Msg](
     }
     consumer ! KafkaConsumerActor.Internal.Stop
   }
+
+  override def metrics: Future[Map[MetricName, Metric]] = {
+    import akka.pattern.ask
+    import scala.concurrent.duration._
+    consumer.?(RequestMetrics)(Timeout(1.minute)).mapTo[ConsumerMetrics].map(_.metrics)(ExecutionContexts.sameThreadExecutionContext)
+  }
+
 }

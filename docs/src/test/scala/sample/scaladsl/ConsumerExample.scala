@@ -7,19 +7,22 @@ package sample.scaladsl
 import akka.pattern.ask
 import akka.kafka.ConsumerMessage.{CommittableMessage, CommittableOffsetBatch}
 import akka.kafka._
-import akka.actor.{Props, ActorRef, Actor, ActorSystem, ActorLogging, PoisonPill}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, PoisonPill, Props}
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
-import akka.stream.ActorMaterializer
+import akka.stream.{ActorMaterializer, ThrottleMode}
 import akka.{Done, NotUsed}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer, StringDeserializer, StringSerializer}
+
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 import java.util.concurrent.atomic.AtomicLong
+
+import akka.util.Timeout
 
 trait ConsumerExample {
   val system = ActorSystem("example")
@@ -89,27 +92,6 @@ object ExternalOffsetStorageExample extends ConsumerExample {
       val partition = 0
       val subscription = Subscriptions.assignmentWithOffset(
         new TopicPartition("topic1", partition) -> fromOffset
-      )
-      val done =
-        Consumer.plainSource(consumerSettings, subscription)
-          .mapAsync(1)(db.save)
-          .runWith(Sink.ignore)
-      // #plainSource
-
-      terminateWhenDone(done)
-    }
-  }
-}
-
-// Consume messages and store a representation, including offset extract from timestamp, in DB
-object ExternalOffsetStorageExampleWithTimes extends ConsumerExample {
-  def main(args: Array[String]): Unit = {
-    // #plainSource
-    val db = new DB
-    db.loadOffset().foreach { fromLongTime =>
-      val partition = 0
-      val subscription = Subscriptions.assignmentOffsetsForTimes(
-        new TopicPartition("topic1", partition) -> fromLongTime
       )
       val done =
         Consumer.plainSource(consumerSettings, subscription)
@@ -363,6 +345,24 @@ object ExternallyControlledKafkaConsumer extends ConsumerExample {
   }
 }
 
+object ConsumerMetrics extends ConsumerExample {
+  def main(args: Array[String]): Unit = {
+    // #consumerMetrics
+    // Consumer is represented by actor
+    val consumer: ActorRef = system.actorOf(KafkaConsumerActor.props(consumerSettings))
+
+    // use the consumer actor manually in streams:
+    val control: Consumer.Control = Consumer
+      .plainExternalSource[Array[Byte], String](consumer, Subscriptions.assignment(new TopicPartition("topic1", 1)))
+      .via(business)
+      .to(Sink.ignore)
+      .run()
+
+    println(s"metrics: ${control.metrics}")
+    // #consumerMetrics
+  }
+}
+
 class StreamWrapperActor extends Actor with ConsumerExample with ActorLogging {
 
   implicit val timeout = akka.util.Timeout(5.seconds)
@@ -416,4 +416,36 @@ object StreamWrapperActor {
     //#errorHandlingSupervisor
     supervisor
   }
+}
+
+object RebalanceListenerExample extends ConsumerExample {
+  //#withRebalanceListenerActor
+  import akka.kafka.TopicPartitionsAssigned
+  import akka.kafka.TopicPartitionsRevoked
+
+  class RebalanceListener extends Actor with ActorLogging {
+    def receive: Receive = {
+      case TopicPartitionsAssigned(sub, topicPartitions) ⇒
+        log.info("Assigned: {}", topicPartitions)
+
+      case TopicPartitionsRevoked(sub, topicPartitions) ⇒
+        log.info("Revoked: {}", topicPartitions)
+    }
+  }
+
+  //#withRebalanceListenerActor
+
+  def createActor(implicit system: ActorSystem): Source[ConsumerRecord[Array[Byte], String], Consumer.Control] = {
+    //#withRebalanceListenerActor
+    val listener = system.actorOf(Props[RebalanceListener])
+
+    val sub = Subscriptions.topics(Set("topic")) // create subscription
+      // additionally, pass the rebalance callbacks:
+      .withRebalanceListener(listener)
+
+    // use the subscription as usual:
+    Consumer.plainSource(consumerSettings, sub)
+    //#withRebalanceListenerActor
+  }
+
 }

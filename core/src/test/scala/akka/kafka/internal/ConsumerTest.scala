@@ -2,15 +2,16 @@
  * Copyright (C) 2014 - 2016 Softwaremill <http://softwaremill.com>
  * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
  */
+
 package akka.kafka.internal
 
 import java.util.concurrent.TimeUnit
-import java.util.{List => JList, Map => JMap, Set => JSet}
+import java.util.{List ⇒ JList, Map ⇒ JMap, Set ⇒ JSet}
 
 import akka.Done
 import akka.actor.ActorSystem
 import akka.kafka.ConsumerMessage._
-import akka.kafka.{CommitTimeoutException, ConsumerSettings}
+import akka.kafka.{CommitTimeoutException, ConsumerSettings, Subscriptions}
 import akka.kafka.Subscriptions.TopicSubscription
 import akka.kafka.scaladsl.Consumer
 import Consumer.Control
@@ -88,12 +89,12 @@ class ConsumerTest(_system: ActorSystem)
 
   def testSource(mock: ConsumerMock[K, V], groupId: String = "group1", topics: Set[String] = Set("topic")): Source[CommittableMessage[K, V], Control] = {
     val settings = new ConsumerSettings(Map(ConsumerConfig.GROUP_ID_CONFIG -> groupId), Some(new StringDeserializer), Some(new StringDeserializer),
-      1.milli, 1.milli, 1.second, closeTimeout, 1.second, 5.seconds, 3, "akka.kafka.default-dispatcher") {
+      1.milli, 1.milli, 1.second, closeTimeout, 1.second, 5.seconds, 3, Duration.Inf, "akka.kafka.default-dispatcher", 1.second, true) {
       override def createKafkaConsumer(): KafkaConsumer[K, V] = {
         mock.mock
       }
     }
-    Consumer.committableSource(settings, TopicSubscription(topics))
+    Consumer.committableSource(settings, Subscriptions.topics(topics))
   }
 
   it should "fail stream when poll() fails with unhandled exception" in {
@@ -120,7 +121,7 @@ class ConsumerTest(_system: ActorSystem)
 
       probe
         .request(1)
-        .expectNoMsg()
+        .expectNoMessage(200.millis)
         .cancel()
     }
   }
@@ -134,7 +135,7 @@ class ConsumerTest(_system: ActorSystem)
 
     probe
       .request(1)
-      .expectNoMsg()
+      .expectNoMessage(200.millis)
       .cancel()
   }
 
@@ -559,7 +560,7 @@ class ConsumerTest(_system: ActorSystem)
       }
 
       probe.cancel()
-      probe.expectNoMsg(200.millis)
+      probe.expectNoMessage(200.millis)
       control.isShutdown.isCompleted should ===(false)
 
       //emulate commit

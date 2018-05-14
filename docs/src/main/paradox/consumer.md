@@ -120,6 +120,8 @@ Java
 Maintaining at-least-once delivery semantics requires care, so many risks and solutions
 are covered in @ref:[At-Least-Once Delivery](atleastonce.md).
 
+If you consume from a not very active topic and it is possible that you don't have any messages received for more than 24 hours, consider enabling periodical commit refresh (`akka.kafka.consumer.commit-refresh-interval` configuration parameters), otherwise offsets might expire in the Kafka storage.
+
 ## Connecting Producer and Consumer
 
 For cases when you need to read messages from one topic, transform or enrich them, and then write to another topic you can use `Consumer.committableSource` and connect it to a `Producer.commitableSink`. The `commitableSink` will commit the offset back to the consumer when it has successfully published the message.
@@ -177,4 +179,25 @@ Java
 : @@ snip [consumerToProducerSink](../../test/java/sample/javadsl/ConsumerExample.java) { #consumerActor }
 
 
+## Accessing KafkaConsumer metrics
 
+You can access the underlying consumer metrics by `ask`-ing the `KafkaConsumerActor` for them: 
+
+Scala
+: @@ snip [consumerMetrics](../../test/scala/sample/scaladsl/ConsumerExample.scala) { #consumerMetrics }
+
+Java
+: @@ snip [consumerMetrics](../../test/java/sample/javadsl/ConsumerExample.java) { #consumerMetrics }
+
+
+## Listening for rebalance events
+
+You may set up an rebalance event listener actor that will be notified when your consumer will be assigned or revoked 
+from consuming from specific topic partitions. Two kinds of messages will be sent to this listener actor 
+`akka.kafka.TopicPartitionsAssigned` and `akka.kafka.TopicPartitionsRevoked`, like this:
+
+Scala
+: @@ snip [withRebalanceListenerActor](../../test/scala/sample/scaladsl/ConsumerExample.scala) { #withRebalanceListenerActor }
+
+Java
+: @@ snip [withRebalanceListenerActor](../../test/java/sample/javadsl/ConsumerExample.java) { #withRebalanceListenerActor }

@@ -8,7 +8,7 @@ package akka.kafka.internal
 import java.util.concurrent.TimeUnit
 
 import akka.NotUsed
-import akka.actor.{ActorRef, ExtendedActorSystem, Terminated}
+import akka.actor.{ActorRef, Cancellable, ExtendedActorSystem, Terminated}
 import akka.dispatch.ExecutionContexts
 import akka.kafka.KafkaConsumerActor.Internal.{ConsumerMetrics, RequestMetrics}
 import akka.kafka.Subscriptions.{TopicSubscription, TopicSubscriptionPattern}
@@ -22,11 +22,13 @@ import akka.stream.{ActorMaterializerHelper, Attributes, Outlet, SourceShape}
 import akka.util.Timeout
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
-
 import scala.annotation.tailrec
 import scala.collection.immutable
 import scala.concurrent.Future
+import scala.concurrent.duration._
 import scala.util.{Failure, Success}
+
+import com.typesafe.config.ConfigFactory
 
 private[kafka] abstract class SubSourceLogic[K, V, Msg](
     val shape: SourceShape[(TopicPartition, Source[Msg, NotUsed])],
@@ -42,6 +44,8 @@ private[kafka] abstract class SubSourceLogic[K, V, Msg](
   // We have created a source for these partitions, but it has not started up and is not in subSources yet.
   var partitionsInStartup: immutable.Set[TopicPartition] = immutable.Set.empty
   var subSources: Map[TopicPartition, Control] = immutable.Map.empty
+  val waitForPendingRequests: FiniteDuration =
+    ConfigFactory.load().getDuration("akka.kafka.consumer.wait-pending-requests", TimeUnit.SECONDS).seconds
 
   override def preStart(): Unit = {
     super.preStart()
@@ -80,28 +84,45 @@ private[kafka] abstract class SubSourceLogic[K, V, Msg](
   private implicit val askTimeout = Timeout(10000, TimeUnit.MILLISECONDS)
   def partitionAssignedCB(tps: Set[TopicPartition]) = {
     implicit val ec = materializer.executionContext
-    getOffsetsOnAssign.fold(pumpCB.invoke(tps)) { getOffsets =>
-      getOffsets(tps)
+
+    val topicsToBeAssigned = tps -- partitionsToRevoke
+    partitionsToRevoke = partitionsToRevoke -- tps
+
+    getOffsetsOnAssign.fold(pumpCB.invoke(topicsToBeAssigned)) { getOffsets =>
+      getOffsets(topicsToBeAssigned)
         .onComplete {
-          case Failure(ex) => stageFailCB.invoke(new ConsumerFailed(s"Failed to fetch offset for partitions: $tps.", ex))
+          case Failure(ex) => stageFailCB.invoke(new ConsumerFailed(s"Failed to fetch offset for partitions: $topicsToBeAssigned.", ex))
           case Success(offsets) =>
             consumer.ask(KafkaConsumerActor.Internal.Seek(offsets))
-              .map(_ => pumpCB.invoke(tps))
+              .map(_ => pumpCB.invoke(topicsToBeAssigned))
               .recover {
-                case _: AskTimeoutException => stageFailCB.invoke(new ConsumerFailed(s"Consumer failed during seek for partitions: $tps."))
+                case _: AskTimeoutException => stageFailCB.invoke(new ConsumerFailed(s"Consumer failed during seek for partitions: $topicsToBeAssigned."))
               }
         }
     }
   }
 
+  var partitionsToRevoke: Set[TopicPartition] = Set.empty
+  var revokePendingCall: Option[Cancellable] = None
+
   def partitionRevokedCB(tps: Set[TopicPartition]) = {
-    getAsyncCallback[Unit] { _ =>
-      onRevoke(tps)
-      pendingPartitions --= tps
-      partitionsInStartup --= tps
-      tps.flatMap(subSources.get).foreach(_.shutdown())
-      subSources --= tps
-    }.invoke(())
+    revokePendingCall.map(_.cancel())
+    partitionsToRevoke ++= tps
+    val cb = getAsyncCallback[Unit] { _ =>
+      onRevoke(partitionsToRevoke)
+      pendingPartitions --= partitionsToRevoke
+      partitionsInStartup --= partitionsToRevoke
+      partitionsToRevoke.flatMap(subSources.get).foreach(_.shutdown())
+      subSources --= partitionsToRevoke
+    }
+    revokePendingCall = Option(
+      materializer.scheduleOnce(
+        waitForPendingRequests,
+        new Runnable {
+          override def run(): Unit = cb.invoke(())
+        }
+      )
+    )
   }
 
   val subsourceCancelledCB = getAsyncCallback[TopicPartition] { tp =>
